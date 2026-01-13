@@ -54,5 +54,136 @@ Nmap done: 1 IP address (1 host up) scanned in 9.85 seconds
 We got 3 ports open: 22, 80, 8080; an SSH, a website, and another secondary website which seems to contain documentation of some sort. Let’s explore them
 
 
+### Port 80
 
-*This box is still active on HackTheBox. Once retired, this writeup will be published for public access as per HackTheBox's policy on publishing content from their platform*
+![image.png](img/Editor/image.png)
+
+Port 80 contains a code editor website called **SimplistCode Pro.** There are a few hyperlinks on this website except which it is all static. There are two download hyperlinks which allow you to download different versions of the code editor for Windows and Linux. Let’s explore more about this shortly
+
+### Port 8080
+
+![image.png](img/Editor/image%201.png)
+
+Port 8080 contains a documentation kind-of website for the Simplistcode Pro editor.
+
+## Website Enumeration
+
+The website on port 80 doesn’t seem to contain anything useful, no `robots.txt`.
+
+But on 8080, we get a `robots.txt`
+
+![image.png](img/Editor/image%202.png)
+
+It contains a variety of links which are disallowed for bots to crawl upon. All look like they are part of dashboard
+
+Whatever endpoint we try to access, the website is asking for login credentials to access them:
+
+![image.png](img/Editor/image%203.png)
+
+Enumerating the website further, we can find there’s an user/developer named `Neal Bagwell`
+
+![image.png](img/Editor/image%204.png)
+
+Trying various combinations of the name `Neal Bagwell` on the forgot username option of the login page yields us this result:-
+
+![image.png](img/Editor/image%205.png)
+
+So `nealbagwell` is a valid username.
+
+At the bottom of the website, we can notice the XWiki version mentioned:
+
+![image.png](img/Editor/image%206.png)
+
+Googling the same version number, leads us to `CVE-2025-32974`
+
+![image.png](img/Editor/image%207.png)
+
+## CVE-2025-24893
+
+`CVE-2025-24893` is an RCE vulnerability in XWiki which allowed unauthenticated attackers to execute arbitrary Groovy code remotely without authentication or prior access. 
+
+Using https://github.com/D3Ext/CVE-2025-24893 PoC to gain shell access to the system:-
+
+![image.png](img/Editor/image%208.png)
+
+![image.png](img/Editor/image%209.png)
+
+Stabilize the shell using Python likewise:-
+
+`python3 -c 'import pty; pty.spawn("/bin/bash")'`
+
+and after this, `export TERM=xterm` and `export SHELL=bash` → to use utilities like vim, nano etc.
+
+## Owning User
+
+We cannot access the user `oliver`'s directory. Enumerating the system further, we come across the `hibernate.cfg.xml` file of the xwiki installation.
+
+![image.png](img/Editor/image%2010.png)
+
+We find a password `theEd1t0rTeam99`. Using it to ssh as `oliver`:-
+
+![image.png](img/Editor/image%2011.png)
+
+We get the user flag.
+
+`oliver:theEd1t0rTeam99`
+
+## Privilege Escalation
+
+`sudo -l` reveals that oliver cannot run sudo on the machine.
+
+Importing and running [`linpeas.sh`](http://linpeas.sh) too doesn’t give much of a lead.
+
+Searching for SUID binaries using the command `find / -type f -perm -4000 -user root 2>/dev/null` gives the following output:-
+
+![image.png](img/Editor/image%2012.png)
+
+There is an interesting SUID binary `ndsudo`. Searching about ndsudo:-
+
+  
+
+![image.png](img/Editor/image%2013.png)
+
+We got a CVE which leads to privesc
+
+### CVE-2024-32019
+
+[https://nvd.nist.gov/vuln/detail/CVE-2024-32019](https://nvd.nist.gov/vuln/detail/CVE-2024-32019) → The `ndsudo` tool shipped with affected versions of the Netdata Agent allows an attacker to run arbitrary programs with root permissions.
+
+Using https://github.com/AliElKhatteb/CVE-2024-32019-POC:-
+
+Compiled the exploit code and transferred to attacking machine by hosting a `python` server and requesting the file using `curl`
+
+![ss1.png](img/Editor/ss1.png)
+
+After transferring the compiled binary to the machine, make it executable by `chmod +x nvme`
+
+Then add the path where the binary is present to the search path, as such:-
+
+`PATH=$(pwd):$PATH` . This will prepend the current path (here `/tmp`) to the existing PATH variable’s value
+
+![ss2.png](img/Editor/ss2.png)
+
+Before running `ndsudo`, make sure your `nc` listener is up and running on your attacking machine on the port you specified in the exploit file
+
+![image.png](img/Editor/image%2014.png)
+
+Now, run `ndsudo` and tell it to execute `nvme-list` 
+
+```bash
+/opt/netdata/usr/libexec/netdata/plugins.d/ndsudo nvme-list
+
+```
+
+![image.png](img/Editor/image%2015.png)
+
+We’ve successfully elevated our privileges to `root`
+
+How did it happen?
+
+When `ndsudo` is told to run `nvme-list` it uses `execvp("nvme-list", ...)` instead of an absolute path, so the kernel searches each directory in `$PATH` for that name; because you prepended your current directory (`PATH=$(pwd):$PATH`), `./nvme` is found first and `ndsudo` executes it with root privileges, so our malicious `nvme` binary runs as root and provides us a root shell.
+
+## Learnings
+
+- Always google versions and names of software during the pentest
+- Always be on the lookout for any anomalous services running on the target machine
